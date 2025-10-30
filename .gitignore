@@ -1,0 +1,10 @@
+# Ignore the streamlit secrets folder
+.streamlit/
+
+# Ignore data files
+insurance.csv
+Ameshousing.csv
+Usedcarpred.csv
+
+# Ignore my project report
+Project_report.docx
