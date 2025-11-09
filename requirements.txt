@@ -3,3 +3,8 @@ pandas
 google-generativeai
 scikit-learn
 xgboost
+lightgbm
+catboost
+langchain
+langchain-google-genai
+langchain-core

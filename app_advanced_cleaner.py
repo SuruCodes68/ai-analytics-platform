@@ -20,6 +20,9 @@ from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.compose import make_column_selector
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
+# --- NEW: Import the other "Big 3" GBMs ---
+from lightgbm import LGBMRegressor
+from catboost import CatBoostRegressor
 
 
 # --- Page Configuration ---
@@ -31,12 +34,18 @@ def extract_python_code(markdown_text):
     """
     Finds the first Python code block in a markdown string.
     """
+    # Look for the section starting with Champion Code, then find the python block
+    code_match = re.search(r"\*\*4\. Champion Code:\*\*(.*?)```python\n(.*?)\n```", markdown_text, re.DOTALL)
+    if code_match:
+        return code_match.group(2).strip() # Return the code block
+    
+    # Fallback for the old prompt structure
     match = re.search(r'```python\n(.*?)```', markdown_text, re.DOTALL)
     if match:
-        return match.group(1)
+        return match.group(1).strip()
     return None
 
-# --- Function to Run the Extracted Code (UPDATED) ---
+# --- Function to Run the Extracted Code (UPDATED SANDBOX) ---
 def run_model_code(code_to_run, df, X_train, X_test, y_train, y_test):
     """
     Executes the AI's code to get y_pred.
@@ -61,7 +70,10 @@ def run_model_code(code_to_run, df, X_train, X_test, y_train, y_test):
             'TransformedTargetRegressor': TransformedTargetRegressor,
             'make_column_selector': make_column_selector, 
             'XGBRegressor': XGBRegressor, 
-            'RandomForestRegressor': RandomForestRegressor 
+            'RandomForestRegressor': RandomForestRegressor,
+            # --- NEW: Add the new models to the sandbox ---
+            'LGBMRegressor': LGBMRegressor,
+            'CatBoostRegressor': CatBoostRegressor
         }
         
         # This exec call is now powerful enough to run custom cleaning functions
@@ -78,9 +90,7 @@ def run_model_code(code_to_run, df, X_train, X_test, y_train, y_test):
     except Exception as e:
         return None, f"An error occurred while running the AI's code:\n{e}"
 
-# --- Hard-Coded Baseline Model Function ---
-# This function will NOT be changed. Its failure on this dataset is
-# the *trigger* for the AI's advanced cleaning.
+# --- Hard-Coded Baseline Model Function (UPDATED) ---
 def run_baseline_model(df):
     """
     Runs a robust Ridge Regression pipeline and returns the metrics.
@@ -107,7 +117,7 @@ def run_baseline_model(df):
         else:
             target_col = target_col[0] # Use the first match
         
-        # --- NEW: Handle the target column for the Used Car dataset ---
+        # Handle the target column for the Used Car dataset
         # The 'price' column is also dirty (e.g., "1,50,000")
         if target_col.lower() == 'price' and df[target_col].dtype == 'object':
             y = pd.to_numeric(df[target_col].str.replace(r'[,\D]', '', regex=True), errors='coerce')
@@ -123,6 +133,12 @@ def run_baseline_model(df):
         numeric_features = X.select_dtypes(include=np.number).columns.tolist()
         categorical_features = X.select_dtypes(exclude=np.number).columns.tolist()
         
+        # --- NEW: Calculate dropped columns ---
+        all_features = X.columns.tolist()
+        used_features = numeric_features + categorical_features
+        dropped_features = [col for col in all_features if col not in used_features]
+        # --- END NEW ---
+
         # Create robust preprocessing pipelines
         numeric_transformer = Pipeline(steps=[
             ('imputer', SimpleImputer(strategy='median')),
@@ -134,13 +150,13 @@ def run_baseline_model(df):
         ])
 
         # Combine pipelines into a single preprocessor
-        # THIS PREPROCESSOR WILL FAIL on "1248 CC" by treating it as a category.
-        # This is the intended behavior for our "dumb" baseline.
         preprocessor = ColumnTransformer(
             transformers=[
                 ('num', numeric_transformer, numeric_features),
                 ('cat', categorical_transformer, categorical_features)
-            ])
+            ],
+            remainder='drop' # This is where the dropping happens
+        )
 
         model_pipeline = Pipeline(steps=[
             ('preprocessor', preprocessor),
@@ -155,7 +171,13 @@ def run_baseline_model(df):
         rmse = root_mean_squared_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
         
-        results = { "model": "Baseline (Ridge Regression)", "target": target_col, "rmse": rmse, "r2": r2 }
+        results = { 
+            "model": "Baseline (Ridge Regression)", 
+            "target": target_col, 
+            "rmse": rmse, 
+            "r2": r2,
+            "dropped_features": dropped_features # Add dropped features to results
+        }
         results_str = f"Target: {target_col}\nRMSE: ${rmse:,.2f}\nR-squared: {r2:.4f}"
         
         return results_str, results, (X_train, X_test, y_train, y_test)
@@ -163,7 +185,7 @@ def run_baseline_model(df):
     except Exception as e:
         return f"Error running baseline model: {e}", None, None
 
-# --- AI Function (Phase 13 Upgrade!) ---
+# --- AI Function (UPDATED PROMPT) ---
 def get_ai_suggestion(df, baseline_results_str, target_col):
     """
     Sends the data summary AND baseline results to Gemini.
@@ -175,7 +197,7 @@ def get_ai_suggestion(df, baseline_results_str, target_col):
     df.info(buf=buffer)
     info_str = buffer.getvalue()
     
-    # --- NEW: Add a hint about dirty columns for the AI ---
+    # --- Add a hint about dirty columns for the AI ---
     dirty_cols_examples = []
     for col in df.select_dtypes(include='object').columns:
         try:
@@ -198,6 +220,7 @@ def get_ai_suggestion(df, baseline_results_str, target_col):
     {dirty_col_hint}
     """
     
+    # --- UPDATED PROMPT FOR FULL TOURNAMENT + TRANSPARENCY ---
     system_prompt = f"""
     You are an expert Data Scientist. Your job is to analyze the following dataset summary and beat my baseline model.
 
@@ -206,7 +229,19 @@ def get_ai_suggestion(df, baseline_results_str, target_col):
     
     **CRITICAL ANALYSIS:** The baseline R-squared is very low (or negative). This is because the baseline's simple preprocessor cannot handle 'dirty' text-numeric columns (like a column 'engine' having values '1248 CC' or 'mileage' having '23.4 kmpl'). The baseline model is treating these as categorical features, which is wrong.
 
-    **Your Task: Provide Champion Code**
+    **Your Task:**
+    You must provide your response in **exactly** four parts, using the exact markdown headers:
+
+    **1. Champion Model Choice:**
+    (State the champion model you chose from this list: `XGBRegressor`, `RandomForestRegressor`, `LGBMRegressor`, or `CatBoostRegressor`.)
+
+    **2. Reasoning:**
+    (Briefly explain why you chose this model. For example, 'LGBMRegressor is often faster than XGBoost' or 'CatBoost is robust...'. Also, explain how your custom cleaning function will fix the baseline's problems.)
+
+    **3. Dropped Columns:**
+    (You MUST state which original columns from the `X_train` dataframe were *not* used in your final model and provide a brief justification for each, e.g., "- `Name`: Dropped, because I engineered a `Brand` feature from it." or "- `Unnamed: 0`: Dropped, it appears to be an index.")
+
+    **4. Champion Code:**
     Provide the *one* complete, executable Python code block that does ALL of the following:
 
     1.  **DEFINE A CUSTOM CLEANING FUNCTION:** You **MUST** define a custom function (e.g., `def custom_clean(df): ...`) that:
@@ -225,7 +260,7 @@ def get_ai_suggestion(df, baseline_results_str, target_col):
         * Your `ColumnTransformer` must handle *both* the *newly cleaned* numeric columns and any *original* numeric/categorical columns.
 
     4.  **DEFINE YOUR MODEL:**
-        * Define an `XGBRegressor` or `RandomForestRegressor`.
+        * Define your chosen champion: `XGBRegressor`, `RandomForestRegressor`, `LGBMRegressor`, or `CatBoostRegressor`.
 
     5.  **WRAP YOUR MODEL (if needed):**
         * If the target variable (`y_train`) is skewed, you **MUST** use `TransformedTargetRegressor` to wrap your entire model pipeline.
@@ -264,8 +299,8 @@ def main_app():
             tab1, tab2, tab3 = st.tabs(["Data Summary", "Column Details", "Visuals"])
             with tab1:
                 st.subheader("DataFrame Summary")
-                # Drop non-numeric columns for describe() to avoid errors
-                st.dataframe(df.describe(include=np.number))
+                # Describe all columns, including non-numeric
+                st.dataframe(df.describe(include='all').T)
             with tab2:
                 st.subheader("Column Details")
                 buffer = io.StringIO()
@@ -273,33 +308,61 @@ def main_app():
                 s = buffer.getvalue()
                 st.text(s)
             
+            # --- "SMART" VISUALS TAB ---
             with tab3:
-                st.subheader("Basic Visualizations")
-                numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                st.subheader("Column Visualizer")
                 
-                if not numeric_cols:
-                    st.write("No numeric columns found to visualize.")
-                else:
-                    col_to_plot = st.selectbox("Select a numeric column", numeric_cols, key="eda_visuals")
-                    
-                    if col_to_plot:
-                        st.markdown("---")
-                        hist_data = df[col_to_plot].value_counts().reset_index()
-                        hist_data.columns = [col_to_plot, 'Count'] 
-                        sort_desc = st.checkbox("Sort by Count (Descending)", value=True)
-                        if sort_desc:
-                            hist_data = hist_data.sort_values(by='Count', ascending=False)
+                # Dropdown to select ANY column
+                all_columns = df.columns.tolist()
+                col_to_plot = st.selectbox("Select a column to visualize", all_columns)
+
+                if col_to_plot:
+                    st.markdown("---")
+                    col_data = df[col_to_plot]
+                    dtype = col_data.dtype
+                    n_unique = col_data.nunique()
+
+                    st.markdown(f"**Column:** `{col_to_plot}` | **Type:** `{dtype}` | **Unique Values:** `{n_unique}`")
+
+                    # --- Logic to decide which plot to show ---
+
+                    # 1. If column is NUMERIC
+                    if np.issubdtype(dtype, np.number):
+                        
+                        # A) If it's CONTINUOUS (like 'bmi' or 'price')
+                        if n_unique > 50: 
+                            st.markdown(f"**Plot Type:** Histogram (for continuous numeric data)")
+                            
+                            # Create histogram data
+                            hist_values, bin_edges = np.histogram(col_data.dropna(), bins=50)
+                            hist_df = pd.DataFrame({
+                                f'{col_to_plot}_bin_start': bin_edges[:-1],
+                                'count': hist_values
+                            })
+                            st.bar_chart(hist_df, x=f'{col_to_plot}_bin_start', y='count')
+
+                        # B) If it's DISCRETE (like 'age' or 'Seats')
                         else:
-                            hist_data = hist_data.sort_values(by=col_to_plot, ascending=True)
+                            st.markdown(f"**Plot Type:** Bar Chart (for discrete numeric data)")
+                            st.bar_chart(col_data.value_counts().sort_index())
 
-                        view_mode = st.radio("Select View Mode", ("Bar Chart", "Data Table"), horizontal=True)
-
-                        if view_mode == "Bar Chart":
-                            st.bar_chart(hist_data, x=col_to_plot, y='Count')
+                    # 2. If column is CATEGORICAL (text/object)
+                    else:
+                        
+                        # A) If it's LOW CARDINALITY (like 'Fuel_Type' or 'Transmission')
+                        if n_unique <= 50:
+                            st.markdown(f"**Plot Type:** Bar Chart (for low-count categorical data)")
+                            st.bar_chart(col_data.value_counts())
+                        
+                        # B) If it's HIGH CARDINALITY (like 'Name' or 'engine' in the dirty set)
                         else:
-                            st.dataframe(hist_data, use_container_width=True)
+                            st.markdown(f"**Plot Type:** Sample of Unique Values (high-count text data)")
+                            st.write(f"Showing the first 50 unique values (out of {n_unique}):")
+                            st.dataframe(col_data.unique()[:50], use_container_width=True)
 
-            # --- UPDATED TITLE ---
+            # --- END OF NEW VISUALS TAB ---
+
+            # --- AI Modeling Section ---
             st.header("Phase 2: AI-Powered Model Tournament")
             
             if st.button("🤖 Run Model Tournament"):
@@ -315,18 +378,32 @@ def main_app():
                     if baseline_metrics and data_split:
                         st.code(baseline_results_str, language='text')
                         
+                        # --- NEW: Display dropped columns for Baseline ---
+                        if baseline_metrics.get('dropped_features'):
+                            st.warning(f"**Baseline Model Dropped:** {len(baseline_metrics['dropped_features'])} columns (e.g., {baseline_metrics['dropped_features'][:5]}...). These were not identified as numeric or categorical.")
+                        
                         X_train, X_test, y_train, y_test = data_split
                         target_col = baseline_metrics['target']
                         
                         # 2. Get AI Champion Model
                         suggestion_text = get_ai_suggestion(st.session_state.df, baseline_results_str, target_col)
                         
-                        st.markdown("### 2. AI Champion Model (with Custom Cleaning)")
-                        
                         if suggestion_text:
                             code = extract_python_code(suggestion_text)
                             
                             if code:
+                                # --- NEW: Parse all 4 parts of the AI's structured response ---
+                                model_choice_match = re.search(r"\*\*1\. Champion Model Choice:\*\*(.*?)\n\*\*2\.", suggestion_text, re.DOTALL)
+                                reasoning_match = re.search(r"\*\*2\. Reasoning:\*\*(.*?)\n\*\*3\.", suggestion_text, re.DOTALL)
+                                dropped_match = re.search(r"\*\*3\. Dropped Columns:\*\*(.*?)\n\*\*4\.", suggestion_text, re.DOTALL)
+
+                                model_choice_text = model_choice_match.group(1).strip() if model_choice_match else "AI Champion"
+                                reasoning_text = reasoning_match.group(1).strip() if reasoning_match else "No analysis text found."
+                                dropped_text = dropped_match.group(1).strip() if dropped_match else None
+                                # --- END NEW PARSING ---
+
+                                st.markdown(f"### 2. AI Champion Model ({model_choice_text})")
+                                
                                 # 3. Run AI Champion Model
                                 y_pred_ai, status_msg = run_model_code(
                                     code, st.session_state.df, 
@@ -341,15 +418,12 @@ def main_app():
                                     results_str_ai = f"RMSE: ${rmse_ai:,.2f}\nR-squared: {r2_ai:.4f}"
                                     st.code(results_str_ai, language='text')
                                     
-                                    code_pattern = r'```python\n(.*?)```'
-                                    cleaned_suggestion_text = re.sub(code_pattern, 
-                                                                     "\n\n*(Code for this model is in the expander below)*\n", 
-                                                                     suggestion_text, 
-                                                                     count=1,
-                                                                     flags=re.DOTALL)
-
+                                    # --- NEW: Show the clean reasoning text AND dropped columns note ---
+                                    if dropped_text:
+                                        st.info(f"**AI's Note on Dropped Columns:** {dropped_text}")
+                                        
                                     with st.expander("See AI's full analysis"):
-                                        st.markdown(cleaned_suggestion_text)
+                                        st.markdown(reasoning_text)
                                     with st.expander("See AI's Champion Model Code"):
                                         st.code(code, language='python')
                                 else:
